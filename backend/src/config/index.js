@@ -35,6 +35,7 @@ const config = {
   defaultImageDurationSeconds: Number(process.env.IMAGE_DURATION_SECONDS || 5),
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 1024),
   playerFullscreen: String(process.env.PLAYER_FULLSCREEN || "true") === "true",
+  playerDebug: String(process.env.PLAYER_DEBUG || "false") === "true",
 };
 
 module.exports = { config };

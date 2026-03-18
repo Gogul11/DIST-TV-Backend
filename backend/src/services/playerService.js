@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
+const { pathToFileURL } = require("url");
 
 const { config } = require("../config");
 const { HttpError } = require("../utils/httpError");
@@ -8,6 +9,23 @@ const { sanitizeFolderName, resolveInside } = require("../utils/safePath");
 
 const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"]);
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"]);
+
+function createLimitedLogBuffer(maxBytes) {
+  let buf = Buffer.alloc(0);
+  return {
+    append(chunk) {
+      if (!chunk || chunk.length === 0) return;
+      const next = Buffer.concat([buf, Buffer.from(chunk)]);
+      buf = next.length > maxBytes ? next.subarray(next.length - maxBytes) : next;
+    },
+    toString() {
+      return buf.toString("utf8");
+    },
+    get size() {
+      return buf.length;
+    },
+  };
+}
 
 function listPlayableFiles(absFolderPath) {
   const entries = fs.readdirSync(absFolderPath, { withFileTypes: true });
@@ -24,8 +42,12 @@ function listPlayableFiles(absFolderPath) {
 }
 
 function writePlaylist(tmpDir, items) {
-  const playlistPath = path.join(tmpDir, `playlist_${Date.now()}.m3u8`);
-  const content = ["#EXTM3U", ...items].join("\n") + "\n";
+  // Use .m3u (not .m3u8) to avoid some VLC builds treating it as HLS.
+  const playlistPath = path.join(tmpDir, `playlist_${Date.now()}.m3u`);
+  const content =
+    ["#EXTM3U", ...items.flatMap((p) => [`#EXTINF:-1,${path.basename(p)}`, pathToFileURL(p).href])].join(
+      "\n"
+    ) + "\n";
   fs.writeFileSync(playlistPath, content, "utf8");
   return playlistPath;
 }
@@ -90,11 +112,18 @@ class PlayerService {
       fullscreen: useFullscreen,
     });
 
+    const debug = Boolean(config.playerDebug);
+    const logBuf = debug ? createLimitedLogBuffer(64 * 1024) : null;
     const proc = spawn(cmd, args, {
       detached: process.platform !== "win32",
-      stdio: "ignore",
+      stdio: debug ? ["ignore", "pipe", "pipe"] : "ignore",
       windowsHide: true,
     });
+
+    if (debug) {
+      proc.stdout?.on("data", (d) => logBuf.append(d));
+      proc.stderr?.on("data", (d) => logBuf.append(d));
+    }
 
     await new Promise((resolve, reject) => {
       proc.once("spawn", resolve);
@@ -114,12 +143,32 @@ class PlayerService {
     });
 
     proc.unref();
-    proc.on("exit", () => {
+    proc.on("exit", (code, signal) => {
       this._proc = null;
       this._state = { playing: false };
       if (this._playlistPath) {
         try {
           fs.unlinkSync(this._playlistPath);
+        } catch {
+          // ignore
+        }
+      }
+      if (debug && logBuf?.size) {
+        try {
+          const logPath = path.join(config.tmpDir, "player_last.log");
+          fs.writeFileSync(
+            logPath,
+            [
+              `cmd: ${cmd}`,
+              `args: ${JSON.stringify(args)}`,
+              `exitCode: ${code}`,
+              `signal: ${signal || ""}`,
+              "",
+              logBuf.toString(),
+              "",
+            ].join("\n"),
+            "utf8"
+          );
         } catch {
           // ignore
         }
@@ -192,6 +241,7 @@ function buildPlayerCommand({ duration, playlistPath, fullscreen }) {
   const args = [
     "--intf",
     "dummy",
+    "--playlist-autostart",
     "--no-video-title-show",
     "--quiet",
     "--loop",
