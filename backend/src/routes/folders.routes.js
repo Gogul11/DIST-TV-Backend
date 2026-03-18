@@ -6,7 +6,11 @@ const { createUploader } = require("../middleware/upload");
 
 const router = express.Router();
 
+router.get("/", asyncHandler(foldersController.listFolders));
+
 router.post("/", asyncHandler(foldersController.createFolder));
+
+router.delete("/:folder", asyncHandler(foldersController.deleteFolder));
 
 router.get("/:folder/contents", asyncHandler(foldersController.listContents));
 

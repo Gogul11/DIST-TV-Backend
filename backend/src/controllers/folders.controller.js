@@ -5,6 +5,17 @@ const { config } = require("../config");
 const { HttpError } = require("../utils/httpError");
 const { sanitizeFolderName, resolveInside } = require("../utils/safePath");
 
+function listFolders(req, res) {
+  const entries = fs.readdirSync(config.baseMediaDir, { withFileTypes: true });
+  const folders = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({ name }));
+
+  res.json({ ok: true, folders });
+}
+
 function createFolder(req, res) {
   const folderName = sanitizeFolderName(req.body?.name);
   if (!folderName) throw new HttpError(400, "Invalid folder name");
@@ -14,6 +25,21 @@ function createFolder(req, res) {
 
   fs.mkdirSync(folderPath, { recursive: true });
   res.json({ ok: true, folder: { name: folderName } });
+}
+
+function deleteFolder(req, res) {
+  const folderName = sanitizeFolderName(req.params.folder);
+  if (!folderName) throw new HttpError(400, "Invalid folder name");
+
+  const folderPath = resolveInside(config.baseMediaDir, folderName);
+  if (!folderPath) throw new HttpError(400, "Invalid folder path");
+  if (!fs.existsSync(folderPath)) throw new HttpError(404, "Folder not found");
+
+  const stat = fs.statSync(folderPath);
+  if (!stat.isDirectory()) throw new HttpError(404, "Folder not found");
+
+  fs.rmSync(folderPath, { recursive: true, force: true });
+  res.json({ ok: true, deleted: { name: folderName } });
 }
 
 function uploadVideo(req, res) {
@@ -76,4 +102,11 @@ function listContents(req, res) {
   res.json({ ok: true, folder: { name: folderName }, items });
 }
 
-module.exports = { createFolder, uploadVideo, uploadImage, listContents };
+module.exports = {
+  listFolders,
+  createFolder,
+  deleteFolder,
+  uploadVideo,
+  uploadImage,
+  listContents,
+};
