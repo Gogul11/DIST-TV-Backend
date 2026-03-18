@@ -54,6 +54,7 @@ const config = {
   vlcVout: process.env.VLC_VOUT || "",
   vlcExtraArgs: parseListEnv(process.env.VLC_EXTRA_ARGS),
   defaultImageDurationSeconds: Number(process.env.IMAGE_DURATION_SECONDS || 5),
+  playerLoopDelaySeconds: Math.max(0, Math.floor(Number(process.env.PLAYER_LOOP_DELAY_SECONDS || 0))),
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 1024),
   playerFullscreen: String(process.env.PLAYER_FULLSCREEN || "true") === "true",
   playerDebug: String(process.env.PLAYER_DEBUG || "false") === "true",

@@ -10,6 +10,10 @@ const { sanitizeFolderName, resolveInside } = require("../utils/safePath");
 const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"]);
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"]);
 
+function isImagePath(filePath) {
+  return IMAGE_EXTS.has(path.extname(filePath).toLowerCase());
+}
+
 function createLimitedLogBuffer(maxBytes) {
   let buf = Buffer.alloc(0);
   return {
@@ -109,6 +113,7 @@ class PlayerService {
     this._proc = null;
     this._state = { playing: false };
     this._playlistPath = null;
+    this._seq = null; // { token, cancelled }
   }
 
   getState() {
@@ -116,7 +121,7 @@ class PlayerService {
   }
 
   async play({ folder, imageDurationSeconds, fullscreen }) {
-    if (this._proc) throw new HttpError(409, "Already playing. Call /api/player/stop first.");
+    if (this._proc || this._seq) throw new HttpError(409, "Already playing. Call /api/player/stop first.");
 
     const folderName = sanitizeFolderName(folder);
     if (!folderName) throw new HttpError(400, "Invalid folder name");
@@ -129,11 +134,6 @@ class PlayerService {
     if (items.length === 0) throw new HttpError(400, "No playable media found in folder");
 
     const player = String(config.player || "vlc").toLowerCase();
-    const playlistPath =
-      player === "mpv"
-        ? writeM3uPlaylist(config.tmpDir, items)
-        : writeXspfPlaylist(config.tmpDir, items);
-    this._playlistPath = playlistPath;
 
     const duration =
       typeof imageDurationSeconds === "number" && Number.isFinite(imageDurationSeconds)
@@ -142,6 +142,30 @@ class PlayerService {
 
     const useFullscreen =
       typeof fullscreen === "boolean" ? fullscreen : config.playerFullscreen;
+
+    // Raspberry Pi fullscreen + VLC can fail to render after the first item when
+    // switching playlist entries. In that case, run VLC per-item with
+    // --play-and-exit and loop in Node.
+    const vlcSequential = player === "vlc" && useFullscreen && items.length > 1;
+
+    if (vlcSequential) {
+      await this._startVlcSequential({ items, duration, fullscreen: useFullscreen });
+      this._state = {
+        playing: true,
+        folder: folderName,
+        itemsCount: items.length,
+        imageDurationSeconds: duration,
+        fullscreen: useFullscreen,
+        player: config.player,
+        startedAt: new Date().toISOString(),
+        mode: "vlc-sequential",
+      };
+      return this._state;
+    }
+
+    const playlistPath =
+      player === "mpv" ? writeM3uPlaylist(config.tmpDir, items) : writeXspfPlaylist(config.tmpDir, items);
+    this._playlistPath = playlistPath;
 
     const { cmd, args } = buildPlayerCommand({
       player,
@@ -232,18 +256,139 @@ class PlayerService {
       fullscreen: useFullscreen,
       player: config.player,
       startedAt: new Date().toISOString(),
+      mode: player === "mpv" ? "mpv-playlist" : "vlc-playlist",
     };
 
     return this._state;
   }
 
-  async stop() {
-    if (!this._proc) return { playing: false };
+  async _startVlcSequential({ items, duration, fullscreen }) {
+    const token = Date.now() + Math.random();
+    this._seq = { token, cancelled: false, index: 0 };
 
-    killProcessTree(this._proc);
+    const debug = Boolean(config.playerDebug);
+    const logBuf = debug ? createLimitedLogBuffer(64 * 1024) : null;
+    const delayMs = Math.max(0, Number(config.playerLoopDelaySeconds || 0)) * 1000;
+    const nextDelayMs = 150 + delayMs;
+
+    const spawnNext = () => {
+      if (!this._seq || this._seq.token !== token || this._seq.cancelled) return;
+
+      const index = this._seq.index % items.length;
+      const itemPath = items[index];
+      const isImage = isImagePath(itemPath);
+
+      const args = buildVlcSingleItemArgs({ duration, itemPath, isImage, fullscreen });
+      const proc = spawn(config.vlcPath, args, {
+        detached: process.platform !== "win32",
+        stdio: debug ? ["ignore", "pipe", "pipe"] : "ignore",
+        windowsHide: true,
+      });
+
+      if (debug) {
+        logBuf.append(`\n--- item ${index + 1}/${items.length}: ${itemPath}\n`);
+        proc.stdout?.on("data", (d) => logBuf.append(d));
+        proc.stderr?.on("data", (d) => logBuf.append(d));
+      }
+
+      proc.once("error", () => {
+        // Stop the sequence on spawn error.
+        this._seq = null;
+        this._proc = null;
+        this._state = { playing: false };
+      });
+
+      proc.once("exit", (code, signal) => {
+        if (!this._seq || this._seq.token !== token) return;
+        if (this._seq.cancelled) {
+          this._seq = null;
+          this._proc = null;
+          this._state = { playing: false };
+          if (debug && logBuf?.size) {
+            try {
+              const logPath = path.join(config.tmpDir, "player_last.log");
+              fs.writeFileSync(
+                logPath,
+                [
+                  `cmd: ${config.vlcPath}`,
+                  `mode: vlc-sequential`,
+                  `itemsCount: ${items.length}`,
+                  `lastExitCode: ${code}`,
+                  `lastSignal: ${signal || ""}`,
+                  "",
+                  logBuf.toString(),
+                  "",
+                ].join("\n"),
+                "utf8"
+              );
+            } catch {
+              // ignore
+            }
+          }
+          return;
+        }
+
+        // Advance and spawn next item.
+        this._seq.index = (this._seq.index + 1) % items.length;
+        setTimeout(spawnNext, nextDelayMs);
+      });
+
+      proc.unref();
+      this._proc = proc;
+    };
+
+    // First spawn must succeed before we return from play().
+    await new Promise((resolve, reject) => {
+      if (!this._seq || this._seq.token !== token) return reject(new Error("Sequence aborted"));
+
+      const index = this._seq.index % items.length;
+      const itemPath = items[index];
+      const isImage = isImagePath(itemPath);
+      const args = buildVlcSingleItemArgs({ duration, itemPath, isImage, fullscreen });
+      const proc = spawn(config.vlcPath, args, {
+        detached: process.platform !== "win32",
+        stdio: debug ? ["ignore", "pipe", "pipe"] : "ignore",
+        windowsHide: true,
+      });
+
+      if (debug) {
+        logBuf.append(`\n--- item ${index + 1}/${items.length}: ${itemPath}\n`);
+        proc.stdout?.on("data", (d) => logBuf.append(d));
+        proc.stderr?.on("data", (d) => logBuf.append(d));
+      }
+
+      proc.once("spawn", resolve);
+      proc.once("error", reject);
+      proc.once("exit", (code, signal) => {
+        // If it exits immediately, still proceed to next item (unless cancelled).
+        if (!this._seq || this._seq.token !== token) return;
+        if (this._seq.cancelled) return;
+        this._seq.index = (this._seq.index + 1) % items.length;
+        setTimeout(spawnNext, nextDelayMs);
+      });
+
+      proc.unref();
+      this._proc = proc;
+    }).catch((err) => {
+      this._seq = null;
+      this._proc = null;
+      throw new HttpError(
+        500,
+        "Failed to start VLC for fullscreen playback. Is VLC installed and working on this device?",
+        { code: err.code, cmd: config.vlcPath }
+      );
+    });
+  }
+
+  async stop() {
+    if (!this._proc && !this._seq) return { playing: false };
+
+    if (this._seq) this._seq.cancelled = true;
+    if (this._proc) killProcessTree(this._proc);
 
     const previous = this._state;
     this._proc = null;
+    this._seq = null;
     this._state = { playing: false };
 
     if (this._playlistPath) {
@@ -300,4 +445,33 @@ function buildPlayerCommand({ player, duration, items, playlistPath, fullscreen 
   args.push(playlistPath);
 
   return { cmd: config.vlcPath, args };
+}
+
+function buildVlcSingleItemArgs({ duration, itemPath, isImage, fullscreen }) {
+  const args = [
+    "--intf",
+    "dummy",
+    "--no-one-instance",
+    "--no-playlist-enqueue",
+    "--playlist-autostart",
+    "--no-video-title-show",
+    "--play-and-exit",
+  ];
+
+  if (config.playerDebug) {
+    args.push("-vv");
+  } else {
+    args.push("--quiet");
+  }
+
+  if (fullscreen) args.push("--fullscreen", "--no-video-deco", "--video-on-top");
+  if (config.vlcVout) args.push(`--vout=${config.vlcVout}`);
+  if (Array.isArray(config.vlcExtraArgs) && config.vlcExtraArgs.length) args.push(...config.vlcExtraArgs);
+
+  // Make images behave like timed slides, then exit.
+  args.push(`--image-duration=${duration}`);
+  if (isImage) args.push(`--run-time=${duration}`);
+
+  args.push(itemPath);
+  return args;
 }
