@@ -41,13 +41,46 @@ function listPlayableFiles(absFolderPath) {
   return files.map((name) => path.join(absFolderPath, name));
 }
 
-function writePlaylist(tmpDir, items) {
+function writeM3uPlaylist(tmpDir, items) {
   // Use .m3u (not .m3u8) to avoid some VLC builds treating it as HLS.
   const playlistPath = path.join(tmpDir, `playlist_${Date.now()}.m3u`);
   const content =
     ["#EXTM3U", ...items.flatMap((p) => [`#EXTINF:-1,${path.basename(p)}`, pathToFileURL(p).href])].join(
       "\n"
     ) + "\n";
+  fs.writeFileSync(playlistPath, content, "utf8");
+  return playlistPath;
+}
+
+function escapeXml(text) {
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function writeXspfPlaylist(tmpDir, items) {
+  const playlistPath = path.join(tmpDir, `playlist_${Date.now()}.xspf`);
+  const tracks = items
+    .map((p) => {
+      const url = pathToFileURL(p).href;
+      const title = path.basename(p);
+      return `    <track><location>${escapeXml(url)}</location><title>${escapeXml(
+        title
+      )}</title></track>`;
+    })
+    .join("\n");
+  const content = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<playlist version="1" xmlns="http://xspf.org/ns/0/">',
+    "  <trackList>",
+    tracks,
+    "  </trackList>",
+    "</playlist>",
+    "",
+  ].join("\n");
   fs.writeFileSync(playlistPath, content, "utf8");
   return playlistPath;
 }
@@ -96,7 +129,10 @@ class PlayerService {
     if (items.length === 0) throw new HttpError(400, "No playable media found in folder");
 
     const player = String(config.player || "vlc").toLowerCase();
-    const playlistPath = player === "mpv" ? writePlaylist(config.tmpDir, items) : null;
+    const playlistPath =
+      player === "mpv"
+        ? writeM3uPlaylist(config.tmpDir, items)
+        : writeXspfPlaylist(config.tmpDir, items);
     this._playlistPath = playlistPath;
 
     const duration =
@@ -245,16 +281,23 @@ function buildPlayerCommand({ player, duration, items, playlistPath, fullscreen 
   const args = [
     "--intf",
     "dummy",
+    "--no-one-instance",
+    "--no-playlist-enqueue",
     "--playlist-autostart",
     "--no-video-title-show",
-    "--quiet",
     "--loop",
     `--image-duration=${duration}`,
   ];
-  if (fullscreen) args.push("--fullscreen");
-  // On some Raspberry Pi VLC builds, .m3u parsing can be flaky; passing media
-  // items directly is more reliable.
-  args.push(...items);
+  if (config.playerDebug) {
+    args.push("-vv");
+  } else {
+    args.push("--quiet");
+  }
+
+  if (fullscreen) args.push("--fullscreen", "--no-video-deco", "--video-on-top");
+  if (config.vlcVout) args.push(`--vout=${config.vlcVout}`);
+  if (Array.isArray(config.vlcExtraArgs) && config.vlcExtraArgs.length) args.push(...config.vlcExtraArgs);
+  args.push(playlistPath);
 
   return { cmd: config.vlcPath, args };
 }

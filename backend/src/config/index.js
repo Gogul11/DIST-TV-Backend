@@ -17,6 +17,25 @@ function ensureDirSync(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
 
+function parseListEnv(value) {
+  if (!value) return [];
+  const trimmed = String(value).trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed.map((v) => String(v)).filter(Boolean);
+    } catch {
+      // fall through
+    }
+  }
+  // Comma-separated fallback
+  return trimmed
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 const baseMediaDir = path.resolve(mustGetEnv("BASE_MEDIA_DIR"));
 ensureDirSync(baseMediaDir);
 
@@ -32,6 +51,8 @@ const config = {
   player: (process.env.PLAYER || "vlc").toLowerCase(),
   mpvPath: process.env.MPV_PATH || "mpv",
   vlcPath: process.env.VLC_PATH || process.env.CVLC_PATH || "vlc",
+  vlcVout: process.env.VLC_VOUT || "",
+  vlcExtraArgs: parseListEnv(process.env.VLC_EXTRA_ARGS),
   defaultImageDurationSeconds: Number(process.env.IMAGE_DURATION_SECONDS || 5),
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 1024),
   playerFullscreen: String(process.env.PLAYER_FULLSCREEN || "true") === "true",
