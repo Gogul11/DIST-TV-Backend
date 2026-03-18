@@ -95,7 +95,8 @@ class PlayerService {
     const items = listPlayableFiles(absFolderPath);
     if (items.length === 0) throw new HttpError(400, "No playable media found in folder");
 
-    const playlistPath = writePlaylist(config.tmpDir, items);
+    const player = String(config.player || "vlc").toLowerCase();
+    const playlistPath = player === "mpv" ? writePlaylist(config.tmpDir, items) : null;
     this._playlistPath = playlistPath;
 
     const duration =
@@ -107,7 +108,9 @@ class PlayerService {
       typeof fullscreen === "boolean" ? fullscreen : config.playerFullscreen;
 
     const { cmd, args } = buildPlayerCommand({
+      player,
       duration,
+      items,
       playlistPath,
       fullscreen: useFullscreen,
     });
@@ -129,10 +132,12 @@ class PlayerService {
       proc.once("spawn", resolve);
       proc.once("error", reject);
     }).catch((err) => {
-      try {
-        fs.unlinkSync(playlistPath);
-      } catch {
-        // ignore
+      if (playlistPath) {
+        try {
+          fs.unlinkSync(playlistPath);
+        } catch {
+          // ignore
+        }
       }
       this._playlistPath = null;
       throw new HttpError(
@@ -161,6 +166,7 @@ class PlayerService {
             [
               `cmd: ${cmd}`,
               `args: ${JSON.stringify(args)}`,
+              `itemsCount: ${items.length}`,
               `exitCode: ${code}`,
               `signal: ${signal || ""}`,
               "",
@@ -221,9 +227,7 @@ const playerService = new PlayerService();
 
 module.exports = { playerService };
 
-function buildPlayerCommand({ duration, playlistPath, fullscreen }) {
-  const player = String(config.player || "vlc").toLowerCase();
-
+function buildPlayerCommand({ player, duration, items, playlistPath, fullscreen }) {
   if (player === "mpv") {
     const args = [
       "--no-terminal",
@@ -248,7 +252,9 @@ function buildPlayerCommand({ duration, playlistPath, fullscreen }) {
     `--image-duration=${duration}`,
   ];
   if (fullscreen) args.push("--fullscreen");
-  args.push(playlistPath);
+  // On some Raspberry Pi VLC builds, .m3u parsing can be flaky; passing media
+  // items directly is more reliable.
+  args.push(...items);
 
   return { cmd: config.vlcPath, args };
 }
