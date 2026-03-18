@@ -12,6 +12,8 @@ router.post("/", asyncHandler(foldersController.createFolder));
 
 router.delete("/:folder", asyncHandler(foldersController.deleteFolder));
 
+router.delete("/:folder/items/:filename", asyncHandler(foldersController.deleteItem));
+
 router.get("/:folder/contents", asyncHandler(foldersController.listContents));
 
 router.post(

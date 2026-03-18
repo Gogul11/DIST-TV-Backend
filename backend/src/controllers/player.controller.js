@@ -1,6 +1,11 @@
 const { HttpError } = require("../utils/httpError");
 const { playerService } = require("../services/playerService");
 
+async function state(req, res) {
+  const current = playerService.getState();
+  res.json({ ok: true, state: current });
+}
+
 async function play(req, res) {
   const folder = String(req.body?.folder || "").trim();
   if (!folder) throw new HttpError(400, "Missing folder");
@@ -21,5 +26,4 @@ async function stop(req, res) {
   res.json({ ok: true, state });
 }
 
-module.exports = { play, stop };
-
+module.exports = { state, play, stop };

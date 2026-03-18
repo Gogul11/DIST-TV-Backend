@@ -42,6 +42,29 @@ function deleteFolder(req, res) {
   res.json({ ok: true, deleted: { name: folderName } });
 }
 
+function isSafeFilename(input) {
+  const value = String(input || "");
+  if (!value) return false;
+  if (value.includes("/") || value.includes("\\") || value.includes("..")) return false;
+  return true;
+}
+
+function deleteItem(req, res) {
+  const folderName = sanitizeFolderName(req.params.folder);
+  if (!folderName) throw new HttpError(400, "Invalid folder name");
+  if (!isSafeFilename(req.params.filename)) throw new HttpError(400, "Invalid filename");
+
+  const absPath = resolveInside(config.baseMediaDir, folderName, req.params.filename);
+  if (!absPath) throw new HttpError(400, "Invalid file path");
+  if (!fs.existsSync(absPath)) throw new HttpError(404, "File not found");
+
+  const stat = fs.statSync(absPath);
+  if (!stat.isFile()) throw new HttpError(404, "File not found");
+
+  fs.unlinkSync(absPath);
+  res.json({ ok: true, deleted: { folder: folderName, filename: req.params.filename } });
+}
+
 function uploadVideo(req, res) {
   if (!req.file) throw new HttpError(400, "Missing file");
   res.json({
@@ -106,6 +129,7 @@ module.exports = {
   listFolders,
   createFolder,
   deleteFolder,
+  deleteItem,
   uploadVideo,
   uploadImage,
   listContents,
